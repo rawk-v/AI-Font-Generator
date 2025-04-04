@@ -1,13 +1,16 @@
 # --- [ Imports and prepare_bitmap_data remain the same ] ---
 import os
+from pathlib import Path
+
 import numpy as np
 from PIL import Image
-import potrace
+import potrace  # pypotrace, Python bindings for potrace
 import math
 import argparse
 
+from typing import List
+
 DEFAULT_INPUT_DIR = './output/characters/' # Directory containing a.png, b.png, comma.png etc.
-DEFAULT_OUTPUT_DIR = './output_svgs/'
 DEFAULT_TURD_SIZE = 2       # Potrace option: suppress speckles smaller than this pixel size
 DEFAULT_OPT_TOLERANCE = 0.2 # Potrace option: curve optimization tolerance
 DEFAULT_ALPHAMAX = 1.0
@@ -115,9 +118,77 @@ def calculate_viewbox(path, img_width, img_height, margin=1):
 
     return vb_x, vb_y, vb_w, vb_h
 
+def convert_png_to_svg(images: List[str], **kwargs):
+    """
+    Converts a list of PNG files to SVG format.
+    
+    Args:
+        images: List of paths to PNG files
+        **kwargs: Optional parameters for potrace
+        
+    """
+    turdsize = kwargs.get('turdsize', DEFAULT_TURD_SIZE)
+    opttolerance = kwargs.get('opttolerance', DEFAULT_OPT_TOLERANCE)
+    alphamax = kwargs.get('alphamax', DEFAULT_ALPHAMAX)
+    opticurve = kwargs.get('opticurve', DEFAULT_OPTICURVE)
+    
+    processed_files = 0
+    
+    for png_path in images:
+        print(f"Processing {png_path}...")
 
-# --- Main Execution ---
-def main():
+        # 1. Prepare Bitmap Data
+        bitmap_data = prepare_bitmap_data(png_path)
+        if bitmap_data is None:
+            print(f"  Skipping {png_path} due to loading error.")
+            continue
+
+        img_height, img_width = bitmap_data.shape[0:2]
+
+        # 2. Trace using pypotrace
+        try:
+            bitmap = potrace.Bitmap(bitmap_data)
+            path = bitmap.trace(
+                turdsize=turdsize,
+                opttolerance=opttolerance,
+                alphamax=alphamax,
+                opticurve=opticurve
+            )
+        except Exception as e:
+            print(f"  Error during tracing for {png_path}: {e}")
+            continue
+
+        # 3. Generate SVG Content
+        if not path:
+            print(f"  Warning: No path traced for {png_path}. Skipping SVG generation.")
+            continue
+
+        vb_x, vb_y, vb_w, vb_h = calculate_viewbox(path, img_width, img_height)
+        path_d = path_to_svg_d(path)
+
+        viewbox_str = f"{vb_x} {vb_y} {vb_w} {vb_h}"
+
+        svg_content = f'''<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="{vb_w}px" height="{vb_h}px" viewBox="{viewbox_str}"
+     xmlns="http://www.w3.org/2000/svg" version="1.1">
+  <path d="{path_d}" fill="black" stroke="none"/>
+</svg>
+'''
+        # 4. Save SVG File
+        svg_path = Path(png_path).with_suffix('.svg').as_posix()
+        try:
+            with open(svg_path, 'w') as f:
+                f.write(svg_content)
+            print(f"  -> Saved {svg_path}")
+            processed_files += 1
+        except Exception as e:
+            print(f"  Error writing SVG file {svg_path}: {e}")
+    print(f"Finished processing {len(images)} files. Converted {processed_files} to SVG.")
+
+
+if __name__ == "__main__":
     # --- Argument Parsing ---
     parser = argparse.ArgumentParser(description="Convert character PNG glyphs to SVG using pypotrace.")
     parser.add_argument(
@@ -126,111 +197,44 @@ def main():
         help=f"Input directory containing character PNG files (default: {DEFAULT_INPUT_DIR})"
     )
     parser.add_argument(
-        "-o", "--output_dir",
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"Output directory for SVG files (default: {DEFAULT_OUTPUT_DIR})"
-    )
-    parser.add_argument(
         "-t", "--turdsize", type=int,
         default=DEFAULT_TURD_SIZE,
         help=f"Potrace 'turdsize' parameter (suppress speckles) (default: {DEFAULT_TURD_SIZE})"
     )
     parser.add_argument(
-        "-O", "--opttolerance", type=float, # Changed to capital O to match potrace convention
+        "-O", "--opttolerance", type=float, 
         default=DEFAULT_OPT_TOLERANCE,
         help=f"Potrace 'opttolerance' parameter (curve optimization) (default: {DEFAULT_OPT_TOLERANCE})"
     )
-    # Add alphamax argument if you want to control it
     parser.add_argument(
         "-a", "--alphamax", type=float,
         default=DEFAULT_ALPHAMAX,
         help=f"Potrace 'alphamax' parameter (corner smoothing) (default: {DEFAULT_ALPHAMAX})"
     )
-    # Add opticurve argument if you want to control it (though default is likely fine)
     parser.add_argument(
         "--opticurve", type=int, choices=[0, 1],
         default=DEFAULT_OPTICURVE,
         help=f"Potrace 'opticurve' parameter (enable/disable curve optimization) (default: {DEFAULT_OPTICURVE})"
     )
-
-
+    
     args = parser.parse_args()
-
+    
     input_dir = args.input_dir
-    output_base_dir = args.output_dir
-    output_dir = os.path.join(output_base_dir, 'characters')
-
-    # --- Directory Setup ---
+    
     if not os.path.isdir(input_dir):
         print(f"Error: Input directory not found: {input_dir}")
-        return
-
-    os.makedirs(output_dir, exist_ok=True)
+        exit(1)
+    
     print(f"Input directory: {input_dir}")
-    print(f"Output directory: {output_dir}")
     print(f"Using Potrace parameters: turdsize={args.turdsize}, opttolerance={args.opttolerance}, alphamax={args.alphamax}, opticurve={args.opticurve}")
-
-
-    # --- Processing Loop ---
-    processed_files = 0
-    for filename in os.listdir(input_dir):
-        if filename.lower().endswith(".png"):
-            char_name = os.path.splitext(filename)[0]
-            png_path = os.path.join(input_dir, filename)
-            svg_path = os.path.join(output_dir, f"{char_name}.svg")
-
-            print(f"Processing {filename}...")
-
-            # 1. Prepare Bitmap Data
-            bitmap_data = prepare_bitmap_data(png_path)
-            if bitmap_data is None:
-                print(f"  Skipping {filename} due to loading error.")
-                continue
-
-            img_height, img_width = bitmap_data.shape[0:2]
-
-            # 2. Trace using pypotrace
-            try:
-                bitmap = potrace.Bitmap(bitmap_data)
-                path = bitmap.trace(
-                    turdsize=args.turdsize,
-                    opttolerance=args.opttolerance,
-                    alphamax=args.alphamax,
-                    opticurve=args.opticurve
-                    # turnpolicy=potrace.TURNPOLICY_MINORITY
-                )
-            except Exception as e:
-                print(f"  Error during tracing for {filename}: {e}")
-                continue
-
-            # 3. Generate SVG Content
-            if not path:
-                 print(f"  Warning: No path traced for {filename}. Skipping SVG generation.")
-                 continue
-
-            vb_x, vb_y, vb_w, vb_h = calculate_viewbox(path, img_width, img_height)
-            path_d = path_to_svg_d(path)
-
-            viewbox_str = f"{vb_x} {vb_y} {vb_w} {vb_h}"
-
-            svg_content = f'''<?xml version="1.0" standalone="no"?>
-<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
-  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg width="{vb_w}px" height="{vb_h}px" viewBox="{viewbox_str}"
-     xmlns="http://www.w3.org/2000/svg" version="1.1">
-  <path d="{path_d}" fill="black" stroke="none"/>
-</svg>
-'''
-            # 4. Save SVG File
-            try:
-                with open(svg_path, 'w') as f:
-                    f.write(svg_content)
-                print(f"  -> Saved {svg_path}")
-                processed_files += 1
-            except Exception as e:
-                print(f"  Error writing SVG file {svg_path}: {e}")
-
-    print(f"\nProcessing finished. Converted {processed_files} files.")
-
-if __name__ == "__main__":
-    main()
+    
+    png_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.lower().endswith(".png")]
+    
+    # Process the PNG files
+    convert_png_to_svg(
+        png_files,
+        turdsize=args.turdsize,
+        opttolerance=args.opttolerance,
+        alphamax=args.alphamax,
+        opticurve=args.opticurve
+    )
