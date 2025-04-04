@@ -3,13 +3,11 @@ import numpy as np
 from PIL import Image
 import os
 import sys
-import traceback # For detailed error printing
+import traceback
 
 def split_font_grid_contours_indexed(image_path, output_dir, characters, padding=5, grid_rows=5, grid_cols=6):
     """
     Splits a font glyph grid image into individual character images using contour detection.
-    Based on the user-preferred version, with added grid removal, indexed filenames,
-    and additional intermediate debug image saving.
     Attempts to use transparency (alpha channel) if available, otherwise falls back
     to grayscale adaptive thresholding.
 
@@ -19,13 +17,14 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
         characters (str): A string containing all characters expected in the grid,
                           used for counting/warnings but NOT for filenames.
         padding (int): Pixels to add around the detected bounding box when cropping.
+        grid_rows (int): Number of rows in the grid (for calculating average cell size).
+        grid_cols (int): Number of columns in the grid (for calculating average cell size).
     """
     try:
         # --- 1. Load Image (Attempting to preserve Alpha channel) ---
         img_pil = None
         img_cv = None
         has_alpha = False
-        # (Image loading logic - unchanged)
         try:
             img_pil = Image.open(image_path)
             print(f"Pillow loaded image mode: {img_pil.mode}")
@@ -123,9 +122,6 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
         if not valid_contours_boxes: print("Error: No valid character contours found after filtering."); return
 
         # --- 5. Sorting Contours/Bounding Boxes ---
-        # (Simple (y,x) sorting - unchanged)
-        print(f"Sorted {len(valid_contours_boxes)} contours using simple y,x sort.")
-
         valid_contours_boxes.sort(key=lambda item: item['area'], reverse=True)
         print(f"Sorted {len(valid_contours_boxes)} contours by area (largest to smallest).")
 
@@ -165,9 +161,8 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
              cv2.drawContours(img_with_sorted_contours, [item['contour']], -1, (255, 0, 0), 1) # Blue contours
              cv2.rectangle(img_with_sorted_contours, (x, y), (x + w, y + h), (0, 0, 255), 1) # Red boxes
              cv2.putText(img_with_sorted_contours, str(i), (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1) # Black index number above box
-        cv2.imwrite(os.path.join(output_dir, "_debug_3_sorted_contours_boxes.png"), img_with_sorted_contours)
-        print("Saved: _debug_3_sorted_contours_boxes.png")
-
+        cv2.imwrite(os.path.join(output_dir, "_debug_3_remove_duplicate_contours_boxes.png"), img_with_sorted_contours)
+        print("Saved: _debug_3_remove_duplicate_contours_boxes.png")
 
         num_expected_chars = len(characters) if characters else 0
         num_found_chars = len(valid_contours_boxes)
@@ -222,14 +217,61 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
             mask = None
 
             if has_alpha and channels == 4 and char_img_cv.shape[2] == 4:
-                # For transparent images, use alpha channel with more aggressive threshold
                 cropped_alpha = char_img_cv[:, :, 3]
-                _, mask = cv2.threshold(cropped_alpha, 30, 255, cv2.THRESH_BINARY)  # Higher threshold to remove borders
                 
-                # Additional morphological operations to remove thin borders
-                kernel = np.ones((5, 5), np.uint8)
-                mask = cv2.erode(mask, kernel, iterations=1)
-                mask = cv2.dilate(mask, kernel, iterations=1)
+                # 1. Initial threshold to create binary mask
+                _, binary_mask = cv2.threshold(cropped_alpha, 30, 255, cv2.THRESH_BINARY)
+                
+                # 2. Find connected components in the binary mask
+                num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
+                
+                # 3. Create clean mask - initially all transparent
+                mask = np.zeros_like(binary_mask)
+                
+                # 4. Get image center and dimensions
+                h, w = binary_mask.shape
+                center_y, center_x = h // 2, w // 2
+                
+                # 5. Process each component to keep central content and remove borders
+                for label in range(1, num_labels):
+                    # Get component properties
+                    area = stats[label, cv2.CC_STAT_AREA]
+                    x = stats[label, cv2.CC_STAT_LEFT]
+                    y = stats[label, cv2.CC_STAT_TOP]
+                    width = stats[label, cv2.CC_STAT_WIDTH]
+                    height = stats[label, cv2.CC_STAT_HEIGHT]
+                    
+                    # Check if component touches the edges
+                    touches_border = (x <= 1 or y <= 1 or 
+                                      x + width >= w - 2 or 
+                                      y + height >= h - 2)
+                    
+                    # Calculate distance from component center to image center
+                    comp_center_y, comp_center_x = centroids[label]
+                    dist_to_center = np.sqrt((comp_center_x - center_x)**2 + 
+                                             (comp_center_y - center_y)**2)
+                    
+                    # Determine if this is likely a border fragment
+                    is_border = touches_border and (
+                        area < (w * h * 0.2) or  # Small area touching border
+                        dist_to_center > min(w, h) * 0.4  # Far from center
+                    )
+                    
+                    # Keep component if it's not identified as border
+                    if not is_border or area > (w * h * 0.3):  # Always keep large components
+                        mask[labels == label] = 255
+                
+                # 6. Additional cleanup for isolated pixels
+                kernel = np.ones((3, 3), np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+                
+                # 7. Save debug visualization of component analysis
+                debug_components = np.zeros((h, w, 3), dtype=np.uint8)
+                for label in range(1, num_labels):
+                    # Assign random color to each component
+                    color = tuple(np.random.randint(0, 255, 3).tolist())
+                    debug_components[labels == label] = color
+                cv2.imwrite(os.path.join(output_dir, f"_debug_components_{i}.png"), debug_components)
             else:
                 # For non-transparent images, use contour-based approach
                 if channels == 4: char_img_bgr = cv2.cvtColor(char_img_cv, cv2.COLOR_BGRA2BGR)
@@ -304,11 +346,11 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
         # (Final count checks - unchanged)
         if characters and num_found_chars < num_expected_chars:
              processed_count = i + 1 if 'i' in locals() else 0
-             print(f"\nWarning: Processed {processed_count} contours, but expected {num_expected_chars} characters.")
+             print(f"Warning: Processed {processed_count} contours, but expected {num_expected_chars} characters.")
         elif characters and num_found_chars > num_expected_chars:
-             print(f"\nNote: Found {num_found_chars} contours initially, more than the {num_expected_chars} expected characters. Only the first {num_expected_chars} were processed based on limit.")
+             print(f"Note: Found {num_found_chars} contours initially, more than the {num_expected_chars} expected characters. Only the first {num_expected_chars} were processed based on limit.")
 
-        print("\nProcessing complete.")
+        print("Processing complete.")
 
     except ImportError: print("Error: OpenCV, NumPy or Pillow not installed. Please install: pip install opencv-python numpy Pillow")
     except Exception as e: print(f"An unexpected error occurred: {e}"); traceback.print_exc()
