@@ -1,3 +1,4 @@
+# --- [ Imports and prepare_bitmap_data remain the same ] ---
 import os
 import numpy as np
 from PIL import Image
@@ -42,56 +43,50 @@ def prepare_bitmap_data(png_path, threshold=128):
     return bitmap_data
 
 
-def path_to_svg_d(path, img_height):
+def path_to_svg_d(path):
     """
     Converts a pypotrace Path object into an SVG path 'd' string.
     """
     d_parts = []
     if not path:
-        return []
+        return ""
 
     for curve in path:
         start_pt = curve.start_point
-        d_parts.append(f"M{start_pt[0]:.3f},{img_height - start_pt[1]:.3f}")
+        d_parts.append(f"M{start_pt[0]:.3f},{start_pt[1]:.3f}")
 
         for segment in curve.segments:
-            # segment.end_point is a tuple
             end_pt = segment.end_point
             if segment.is_corner:
-                # A corner segment means a line to the end_point from the previous point.
-                # FIX: Access tuple elements by index
-                d_parts.append(f"L{end_pt[0]:.3f},{img_height - end_pt[1]:.3f}")
-            else: # is_bezier
-                # segment.c1, segment.c2 are tuples
+                d_parts.append(f"L{end_pt[0]:.3f},{end_pt[1]:.3f}")
+            else:
                 c1 = segment.c1
                 c2 = segment.c2
-                # FIX: Access tuple elements by index
-                d_parts.append(f"C{c1[0]:.3f},{img_height - c1[1]:.3f} "
-                               f"{c2[0]:.3f},{img_height - c2[1]:.3f} "
-                               f"{end_pt[0]:.3f},{img_height - end_pt[1]:.3f}")
+                d_parts.append(f"C{c1[0]:.3f},{c1[1]:.3f} "
+                               f"{c2[0]:.3f},{c2[1]:.3f} "
+                               f"{end_pt[0]:.3f},{end_pt[1]:.3f}")
         d_parts.append("Z") # Close the path
 
-    return d_parts
+    return " ".join(d_parts)
 
-def calculate_viewbox(path, img_height, margin=1):
+def calculate_viewbox(path, img_width, img_height, margin=1):
     """
     Calculates the viewBox for the SVG based on the path bounds.
     """
+    fallback_viewbox = (0, 0, img_width, img_height)
     if not path:
-        return 0, 0, img_height, img_height
+        return fallback_viewbox
 
-    min_x, min_y_svg = float('inf'), float('inf')
-    max_x, max_y_svg = float('-inf'), float('-inf')
+    # Use min_y, max_y directly assuming Y-down coordinates
+    min_x, min_y = float('inf'), float('inf')
+    max_x, max_y = float('-inf'), float('-inf')
 
-    # Function to update bounds, applying Y flip
     def update_bounds(pt):
-        # FIX: Access tuple elements by index (pt[0] is x, pt[1] is y)
-        nonlocal min_x, min_y_svg, max_x, max_y_svg
-        svg_y = img_height - pt[1] # Use pt[1] for y
-        min_x = min(min_x, pt[0])  # Use pt[0] for x
-        max_x = max(max_x, pt[0])  # Use pt[0] for x
-        min_y_svg = min(min_y_svg, svg_y)
-        max_y_svg = max(max_y_svg, svg_y)
+        nonlocal min_x, min_y, max_x, max_y
+        min_x = min(min_x, pt[0])
+        max_x = max(max_x, pt[0])
+        min_y = min(min_y, pt[1])
+        max_y = max(max_y, pt[1])
 
     for curve in path:
         # curve.start_point is a tuple
@@ -106,13 +101,13 @@ def calculate_viewbox(path, img_height, margin=1):
 
     # Handle cases where path might be empty or degenerate
     if min_x == float('inf'):
-        return f"0 0 {img_height} {img_height}" # Fallback
+        return fallback_viewbox
 
     # Calculate viewBox attributes with margin
     vb_x = math.floor(min_x - margin)
-    vb_y = math.floor(min_y_svg - margin)
+    vb_y = math.floor(min_y - margin)
     vb_w = math.ceil(max_x - min_x + 2 * margin)
-    vb_h = math.ceil(max_y_svg - min_y_svg + 2 * margin)
+    vb_h = math.ceil(max_y - min_y + 2 * margin)
 
     # Ensure width and height are positive
     vb_w = max(1, vb_w)
@@ -192,7 +187,7 @@ def main():
                 print(f"  Skipping {filename} due to loading error.")
                 continue
 
-            img_height = bitmap_data.shape[0] # Needed for Y-flipping
+            img_height, img_width = bitmap_data.shape[0:2]
 
             # 2. Trace using pypotrace
             try:
@@ -213,17 +208,17 @@ def main():
                  print(f"  Warning: No path traced for {filename}. Skipping SVG generation.")
                  continue
 
-            viewbox = calculate_viewbox(path, img_height)
-            path_d = path_to_svg_d(path, img_height)
+            vb_x, vb_y, vb_w, vb_h = calculate_viewbox(path, img_width, img_height)
+            path_d = path_to_svg_d(path)
 
-            _, _, svg_width, svg_height = viewbox
+            viewbox_str = f"{vb_x} {vb_y} {vb_w} {vb_h}"
 
             svg_content = f'''<?xml version="1.0" standalone="no"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
   "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg width="{svg_width}px" height="{svg_height}px" viewBox="{' '.join([str(i) for i in viewbox])}"
+<svg width="{vb_w}px" height="{vb_h}px" viewBox="{viewbox_str}"
      xmlns="http://www.w3.org/2000/svg" version="1.1">
-  <path d="{' '.join(path_d)}" fill="black" stroke="none"/>
+  <path d="{path_d}" fill="black" stroke="none"/>
 </svg>
 '''
             # 4. Save SVG File
