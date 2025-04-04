@@ -4,8 +4,9 @@ from PIL import Image
 import os
 import sys
 import traceback
+import argparse
 
-def split_font_grid_contours_indexed(image_path, output_dir, characters, padding=5, grid_rows=5, grid_cols=6):
+def split_font_grid_contours_indexed(image_path, output_dir, characters, padding=5, grid_rows=5, grid_cols=6, debug=False):
     """
     Splits a font glyph grid image into individual character images using contour detection.
     Attempts to use transparency (alpha channel) if available, otherwise falls back
@@ -19,8 +20,15 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
         padding (int): Pixels to add around the detected bounding box when cropping.
         grid_rows (int): Number of rows in the grid (for calculating average cell size).
         grid_cols (int): Number of columns in the grid (for calculating average cell size).
+        debug (bool): Whether to save debug images.
     """
     try:
+        chars_dir = os.path.join(output_dir, "characters")
+        debug_dir = os.path.join(output_dir, "debug")
+        os.makedirs(chars_dir, exist_ok=True)
+        if debug:
+            os.makedirs(debug_dir, exist_ok=True)
+
         # --- 1. Load Image (Attempting to preserve Alpha channel) ---
         img_pil = None
         img_cv = None
@@ -53,19 +61,11 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
         img_height, img_width, channels = img_cv.shape
         print(f"Image size: {img_width}x{img_height}, Channels: {channels}, Has Alpha: {has_alpha}")
 
-        # Ensure output directory exists early
-        if not os.path.exists(output_dir):
-            try: os.makedirs(output_dir); print(f"Created output directory: {output_dir}")
-            except OSError as e: print(f"Error creating directory {output_dir}: {e}"); return
-
         # --- 2. Preprocessing (Create Binary Mask) ---
         thresh = None
         # (Thresholding logic - unchanged)
         if has_alpha and channels == 4:
             print("Using Alpha channel for thresholding.")
-            cv2.imshow("Alpha Channel", img_cv[:, :, 3])
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
             alpha_channel = img_cv[:, :, 3]
             _, thresh = cv2.threshold(alpha_channel, 10, 255, cv2.THRESH_BINARY)
         else:
@@ -78,17 +78,18 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
             thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, blockSize, C)
 
         if thresh is None: print("Error: Threshold image could not be generated."); return
-        cv2.imwrite(os.path.join(output_dir, "_debug_threshold.png"), thresh) # Save threshold image
+        if debug:
+            cv2.imwrite(os.path.join(debug_dir, "_threshold.png"), thresh)
 
         # --- 3. Contour Finding ---
         contours, hierarchy = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
         print(f"Found {len(contours)} initial contours (using RETR_LIST).")
 
         # --- DEBUG VIS 1: Draw ALL contours ---
-        img_with_all_contours = img_cv.copy()
-        cv2.drawContours(img_with_all_contours, contours, -1, (0, 255, 0), 1) # Draw all contours in green
-        cv2.imwrite(os.path.join(output_dir, "_debug_1_all_contours.png"), img_with_all_contours)
-        print("Saved: _debug_1_all_contours.png")
+        if debug:
+            img_with_all_contours = img_cv.copy()
+            cv2.drawContours(img_with_all_contours, contours, -1, (0, 255, 0), 1)  # Draw all contours in green
+            cv2.imwrite(os.path.join(debug_dir, "_1_all_contours.png"), img_with_all_contours)
 
         # --- 4. Filtering Contours ---
         valid_contours_boxes = []
@@ -110,14 +111,13 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
         print(f"Found {len(valid_contours_boxes)} potentially valid character contours after filtering.")
 
         # --- DEBUG VIS 2: Draw FILTERED contours and boxes ---
-        img_with_filtered_contours = img_cv.copy()
-        for item in valid_contours_boxes:
-             x, y, w, h = item['box']
-             cv2.drawContours(img_with_filtered_contours, [item['contour']], -1, (255, 0, 0), 1) # Filtered contours in blue
-             cv2.rectangle(img_with_filtered_contours, (x, y), (x + w, y + h), (0, 0, 255), 1) # Bounding boxes in red
-        cv2.imwrite(os.path.join(output_dir, "_debug_2_filtered_contours_boxes.png"), img_with_filtered_contours)
-        print("Saved: _debug_2_filtered_contours_boxes.png")
-
+        if debug:
+            img_with_filtered_contours = img_cv.copy()
+            for item in valid_contours_boxes:
+                x, y, w, h = item['box']
+                cv2.drawContours(img_with_filtered_contours, [item['contour']], -1, (255, 0, 0), 1)  # Filtered contours in blue
+                cv2.rectangle(img_with_filtered_contours, (x, y), (x + w, y + h), (0, 0, 255), 1)  # Bounding boxes in red
+            cv2.imwrite(os.path.join(debug_dir, "_2_filtered_contours_boxes.png"), img_with_filtered_contours)
 
         if not valid_contours_boxes: print("Error: No valid character contours found after filtering."); return
 
@@ -155,14 +155,14 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
         valid_contours_boxes.sort(key=lambda item: (item['box'][1], item['box'][0])) # Sort by y, then x
     
         # --- DEBUG VIS 3: Draw SORTED contours/boxes with index numbers ---
-        img_with_sorted_contours = img_cv.copy()
-        for i, item in enumerate(valid_contours_boxes):
-             x, y, w, h = item['box']
-             cv2.drawContours(img_with_sorted_contours, [item['contour']], -1, (255, 0, 0), 1) # Blue contours
-             cv2.rectangle(img_with_sorted_contours, (x, y), (x + w, y + h), (0, 0, 255), 1) # Red boxes
-             cv2.putText(img_with_sorted_contours, str(i), (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1) # Black index number above box
-        cv2.imwrite(os.path.join(output_dir, "_debug_3_remove_duplicate_contours_boxes.png"), img_with_sorted_contours)
-        print("Saved: _debug_3_remove_duplicate_contours_boxes.png")
+        if debug:
+            img_with_sorted_contours = img_cv.copy()
+            for i, item in enumerate(valid_contours_boxes):
+                x, y, w, h = item['box']
+                cv2.drawContours(img_with_sorted_contours, [item['contour']], -1, (255, 0, 0), 1)  # Blue contours
+                cv2.rectangle(img_with_sorted_contours, (x, y), (x + w, y + h), (0, 0, 255), 1)  # Red boxes
+                cv2.putText(img_with_sorted_contours, str(i), (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)  # Black index number above box
+            cv2.imwrite(os.path.join(debug_dir, "_3_deduplicate_contours_boxes.png"), img_with_sorted_contours)
 
         num_expected_chars = len(characters) if characters else 0
         num_found_chars = len(valid_contours_boxes)
@@ -266,12 +266,13 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
                 mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
                 
                 # 7. Save debug visualization of component analysis
-                debug_components = np.zeros((h, w, 3), dtype=np.uint8)
-                for label in range(1, num_labels):
-                    # Assign random color to each component
-                    color = tuple(np.random.randint(0, 255, 3).tolist())
-                    debug_components[labels == label] = color
-                cv2.imwrite(os.path.join(output_dir, f"_debug_components_{i}.png"), debug_components)
+                if debug:
+                    debug_components = np.zeros((h, w, 3), dtype=np.uint8)
+                    for label in range(1, num_labels):
+                        # Assign random color to each component
+                        color = tuple(np.random.randint(0, 255, 3).tolist())
+                        debug_components[labels == label] = color
+                    cv2.imwrite(os.path.join(debug_dir, f"_components_{i}.png"), debug_components)
             else:
                 # For non-transparent images, use contour-based approach
                 if channels == 4: char_img_bgr = cv2.cvtColor(char_img_cv, cv2.COLOR_BGRA2BGR)
@@ -289,10 +290,8 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
                 cv2.drawContours(mask, inner_contours, -1, (255), thickness=cv2.FILLED)
 
             # --- DEBUG VIS 4: Save the individual mask ---
-            if mask is not None:
-                cv2.imwrite(os.path.join(output_dir, f"_debug_mask_{i}.png"), mask)
-            else:
-                print(f"Warning: Mask for index {i} was not generated.")
+            if debug:
+                cv2.imwrite(os.path.join(debug_dir, f"_mask_{i}.png"), mask)
 
             # Create a standardized output image (with transparency)
             std_img = np.zeros((max_height, max_width, 4), dtype=np.uint8)
@@ -329,9 +328,9 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
                         '?': 'question',
                         '!': 'exclamation'
                     }[char]
-                output_filename = os.path.join(output_dir, f"{char}.png")
+                output_filename = os.path.join(chars_dir, f"{char}.png")
             else:
-                output_filename = os.path.join(output_dir, f"{i}.png")
+                output_filename = os.path.join(chars_dir, f"{i}.png")
 
             try:
                 success = cv2.imwrite(output_filename, std_img)
@@ -357,9 +356,23 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
 
 
 if __name__ == "__main__":
-    INPUT_IMAGE = sys.argv[1]
-    OUTPUT_FOLDER = sys.argv[2]
-    CHARACTERS = "abcdefghijklmnopqrstuvwxyz,.?!"
-    PADDING = 5
-
-    split_font_grid_contours_indexed(INPUT_IMAGE, OUTPUT_FOLDER, CHARACTERS, PADDING)
+    parser = argparse.ArgumentParser(description="Split a font grid image into individual character images")
+    parser.add_argument("input_image", help="Path to the input grid image file (PNG preferred for transparency)")
+    parser.add_argument("output_folder", default='output', help="Directory where the character images will be saved")
+    parser.add_argument("-c", "--characters", default="abcdefghijklmnopqrstuvwxyz,.?!", help="String containing all characters expected in the grid")
+    parser.add_argument("-p", "--padding", type=int, default=5, help="Pixels to add around the detected bounding box when cropping")
+    parser.add_argument("-r", "--grid-rows", type=int, default=5, help="Number of rows in the grid")
+    parser.add_argument("-l", "--grid-cols", type=int, default=6, help="Number of columns in the grid")
+    parser.add_argument("-d", "--debug", action="store_true", default=False, help="Save debug images")
+    
+    args = parser.parse_args()
+    
+    split_font_grid_contours_indexed(
+        args.input_image,
+        args.output_folder,
+        args.characters,
+        args.padding,
+        args.grid_rows,
+        args.grid_cols,
+        args.debug
+    )
