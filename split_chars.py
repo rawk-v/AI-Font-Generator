@@ -328,7 +328,9 @@ def split_font_grid_contours_indexed(image_path, output_dir, characters, padding
                         '?': 'question',
                         '!': 'exclamation'
                     }[char]
-                output_filename = os.path.join(chars_dir, f"{char}.png")
+                    output_filename = os.path.join(chars_dir, f"{char}.png")
+                else:
+                    output_filename = os.path.join(chars_dir, f"{ord(char)}_{char}.png")
             else:
                 output_filename = os.path.join(chars_dir, f"{i}.png")
 
